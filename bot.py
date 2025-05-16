@@ -1,0 +1,1630 @@
+#!/usr/bin/env python3
+"""
+Text Master Bot - Telegram бот для извлечения текста из изображений, 
+перевода текста на разные языки и преобразования в речь с регулируемой скоростью.
+
+Автор: Разработано на платформе Replit
+Версия: 1.2.0
+Дата: Май 2025
+Лицензия: MIT
+"""
+import os
+import sys
+import logging
+import tempfile
+
+# Настройка логгера
+logger = logging.getLogger(__name__)
+
+# Импорт констант приложения
+from constants import (
+    SPEED_OPTIONS, DEFAULT_SOURCE_LANGUAGE, DEFAULT_LANGUAGE, DEFAULT_SPEED,
+    DEFAULT_AUDIO_LANGUAGE, AVAILABLE_AUDIO_LANGUAGES,
+    APP_NAME, APP_VERSION, VOICE_TYPES
+)
+
+# Настройка логгера
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Создаем директорию для загрузок
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def main():
+    """Главная функция для запуска бота."""
+    # Проверка наличия переменной окружения с токеном
+    if not os.environ.get('TELEGRAM_BOT_TOKEN'):
+        logger.error('TELEGRAM_BOT_TOKEN не найден в переменных окружения')
+        print("\033[91mОШИБКА: TELEGRAM_BOT_TOKEN не установлен!\033[0m")
+        print("\033[93mПожалуйста, установите токен бота через переменную окружения.\033[0m")
+        return 1
+
+    # Импорт необходимых библиотек
+    try:
+        from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        from constants import SPEED_OPTIONS, DEFAULT_SOURCE_LANGUAGE, DEFAULT_LANGUAGE, DEFAULT_SPEED
+        from translator import translate_text, get_available_languages
+        from text_to_speech import text_to_speech, adjust_audio_speed
+        from ocr import extract_text_from_image
+        from user_preferences import UserPreferences
+    except ImportError as e:
+        logger.error(f"Ошибка импорта: {e}")
+        print(f"\033[91mОшибка при импорте модулей: {e}\033[0m")
+        print("\033[93mУбедитесь, что все необходимые пакеты установлены:\033[0m")
+        print("pip install python-telegram-bot==13.15 deep-translator gtts pydub pytesseract pillow")
+        return 1
+
+    # Словарь для хранения пользовательских настроек
+    # Теперь настройки сохраняются между сессиями в базе данных
+    user_prefs = {}
+    
+    # Словарь для хранения групп изображений
+    # Структура: {media_group_id: {'user_id': user_id, 'images': [], 'message_id': None}
+    media_groups = {}
+
+    # Обработчики команд
+    def start_command(update, context):
+        """Обрабатывает команду /start."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            # UserPreferences теперь загружает настройки из базы данных
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        # Создаем красивое главное меню с кнопками
+        keyboard = [
+            [InlineKeyboardButton("🌟 Возможности бота", callback_data="show_features")],
+            [InlineKeyboardButton("⚙️ Настройки", callback_data="back_to_settings")],
+            [InlineKeyboardButton("🎧 Язык озвучивания", callback_data="show_audio_languages")],
+            [InlineKeyboardButton("🌎 Язык перевода", callback_data="show_languages")],
+            [InlineKeyboardButton("🔊 Скорость речи", callback_data="show_speeds")],
+            [InlineKeyboardButton("ℹ️ О боте", callback_data="about_bot")],
+            [InlineKeyboardButton("❓ Помощь", callback_data="show_help")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_text = (
+            f"👋 *Добро пожаловать в {APP_NAME}!*\n\n"
+            "🔍 *Я умею:*\n"
+            "• 📷 → 📝 Извлекать текст из изображений\n"
+            "• 🌎 Переводить текст на разные языки\n"
+            "• 🔊 Преобразовывать текст в речь\n\n"
+            "📋 *Как пользоваться:*\n"
+            "• Отправьте фото с текстом\n"
+            "• Отправьте текстовое сообщение\n"
+            "• Выберите нужные опции из меню ниже\n\n"
+            "👉 Начните сейчас! Используйте кнопки или отправьте мне фото/текст.\n\n"
+            f"🔹 Версия: {APP_VERSION}"
+        )
+        
+        update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    def help_command(update, context):
+        """Обрабатывает команду /help."""
+        # Используем константы из глобального импорта
+        
+        help_text = (
+            f"📚 *Справка по {APP_NAME}* 📚\n\n"
+            "🤖 *Доступные команды:*\n"
+            "• /start - Начало работы с ботом\n"
+            "• /help - Показать эту справку\n"
+            "• /settings - Настройки бота\n"
+            "• /source_language - Выбор исходного языка текста\n"
+            "• /language - Выбор языка перевода\n"
+            "• /audio_language - Выбор языка озвучивания\n"
+            "• /voice_type - Выбор типа голоса\n"
+            "• /speed - Настройка скорости речи\n\n"
+            "🔄 *Функции бота:*\n"
+            "• 📷 *OCR* - распознавание текста с изображений\n"
+            "• 🌐 *Перевод* - на 100+ языков мира\n"
+            "• 🎧 *Text-to-Speech* - преобразование в голос\n\n"
+            "💡 *Советы по использованию:*\n"
+            "• Для лучшего распознавания используйте четкие фото\n"
+            "• Выбирайте язык перевода до отправки сообщения\n"
+            "• Настраивайте скорость речи под свои предпочтения\n\n"
+            "🔹 Создано с использованием технологий OCR, Google Translate и gTTS\n"
+            f"🔸 Версия {APP_VERSION} | 2025"
+        )
+        
+        update.message.reply_text(help_text, parse_mode='Markdown')
+
+    def settings_command(update, context):
+        """Обрабатывает команду /settings."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            # UserPreferences теперь загружает настройки из базы данных
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        keyboard = [
+            [InlineKeyboardButton("🔍 Изменить исходный язык", callback_data="show_source_languages")],
+            [InlineKeyboardButton("🌎 Изменить язык перевода", callback_data="show_languages")],
+            [InlineKeyboardButton("🎧 Изменить язык озвучивания", callback_data="show_audio_languages")],
+            [InlineKeyboardButton("🎤 Изменить тип голоса", callback_data="show_voice_types")],
+            [InlineKeyboardButton("🔊 Изменить скорость речи", callback_data="show_speeds")],
+            [InlineKeyboardButton("ℹ️ О боте", callback_data="about_bot")]
+        ]
+        
+        # Получаем эмодзи для языков и скорости
+        language_emojis = {
+            'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+            'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+            'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+        }
+        
+        language_code = user_prefs[user_id].language
+        language_emoji = language_emojis.get(language_code, '🌐')
+        
+        audio_language_code = user_prefs[user_id].audio_language
+        audio_language_emoji = language_emojis.get(audio_language_code, '🎧')
+        
+        # Получаем эмодзи для скорости
+        speed_emojis = {
+            0.5: "🐢", 
+            0.75: "🚶", 
+            1.0: "🏃", 
+            1.25: "🚴", 
+            1.5: "🏎️", 
+            2.0: "🚀"
+        }
+        speed = user_prefs[user_id].speed
+        speed_emoji = speed_emojis.get(speed, "🔊")
+        
+        current_settings = (
+            f"⚙️ *Настройки {APP_NAME}*\n\n"
+            f"{language_emoji} *Язык перевода:* {user_prefs[user_id].language_name}\n"
+            f"{audio_language_emoji} *Язык озвучивания:* {user_prefs[user_id].audio_language_name}\n"
+            f"{speed_emoji} *Скорость речи:* {user_prefs[user_id].speed}x\n\n"
+            f"Выберите опцию для изменения:"
+        )
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text(
+            current_settings,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    def language_command(update, context):
+        """Обрабатывает команду /language."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+            
+        show_language_options(update, context)
+
+    def speed_command(update, context):
+        """Обрабатывает команду /speed."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+            
+        show_speed_options(update, context)
+        
+    def source_language_command(update, context):
+        """Обрабатывает команду /source_language."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+            
+        show_source_language_options(update, context)
+        
+    def audio_language_command(update, context):
+        """Обрабатывает команду /audio_language."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+            
+        show_audio_language_options(update, context)
+        
+    def voice_type_command(update, context):
+        """Обрабатывает команду /voice_type."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+            
+        show_voice_type_options(update, context)
+
+    def show_language_options(update, context):
+        """Показывает доступные языки перевода."""
+        languages = get_available_languages()
+        
+        # Создаем улучшенную клавиатуру с языками и эмодзи
+        keyboard = []
+        current_row = []
+        
+        # Словарь для популярных языков и их эмодзи
+        language_emojis = {
+            'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+            'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+            'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+        }
+        
+        # Сначала добавляем популярные языки
+        popular_languages = []
+        other_languages = []
+        
+        for code, name in languages.items():
+            if code in language_emojis:
+                popular_languages.append((code, name, language_emojis[code]))
+            else:
+                other_languages.append((code, name, '🌐'))
+        
+        # Сортируем популярные языки
+        popular_languages.sort(key=lambda x: x[1])
+        
+        # Добавляем популярные языки в клавиатуру
+        for code, name, emoji in popular_languages:
+            if len(current_row) == 2:
+                keyboard.append(current_row)
+                current_row = []
+            current_row.append(InlineKeyboardButton(f"{emoji} {name}", callback_data=f"lang_{code}"))
+        
+        # Добавляем остальные языки
+        other_languages.sort(key=lambda x: x[1])
+        for code, name, emoji in other_languages:
+            if len(current_row) == 2:
+                keyboard.append(current_row)
+                current_row = []
+            current_row.append(InlineKeyboardButton(f"{emoji} {name}", callback_data=f"lang_{code}"))
+        
+        # Добавляем оставшиеся кнопки
+        if current_row:
+            keyboard.append(current_row)
+        
+        # Добавляем кнопки навигации
+        keyboard.append([
+            InlineKeyboardButton("↩️ Назад", callback_data="back_to_settings"),
+            InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Обрабатываем как callback, так и прямые команды
+        language_header = "🌎 *Выберите язык перевода:*\n\n" \
+                         "Популярные языки расположены в начале списка\n" \
+                         "Выберите язык из меню ниже 👇"
+        
+        if hasattr(update, 'callback_query'):
+            update.callback_query.edit_message_text(
+                language_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            update.message.reply_text(
+                language_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
+    def show_voice_type_options(update, context):
+        """Показывает доступные типы голосов для озвучивания."""
+        keyboard = []
+        
+        # Эмодзи для типов голосов
+        voice_type_emojis = {
+            "normal": "🔊",
+            "slow": "🐢",
+            "clear": "🔍",
+            "emotional": "😀"
+        }
+        
+        # Создаем кнопки для каждого типа голоса
+        for voice_code, voice_name in VOICE_TYPES.items():
+            emoji = voice_type_emojis.get(voice_code, "🎤")
+            keyboard.append([InlineKeyboardButton(f"{emoji} {voice_name}", callback_data=f"voice_{voice_code}")])
+        
+        # Добавляем кнопки навигации
+        keyboard.append([
+            InlineKeyboardButton("↩️ Назад", callback_data="back_to_settings"),
+            InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Обрабатываем как callback, так и прямые команды
+        voice_header = "🎤 *Выберите тип голоса:*\n\n" \
+                      "🔊 *Обычный* - Стандартное озвучивание\n" \
+                      "🐢 *Медленный* - Четкое произношение\n" \
+                      "🔍 *Четкий* - Особенно четкая артикуляция\n" \
+                      "😀 *Эмоциональный* - С интонацией и выражением"
+        
+        if hasattr(update, 'callback_query'):
+            update.callback_query.edit_message_text(
+                voice_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            update.message.reply_text(
+                voice_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    def show_source_language_options(update, context):
+        """Показывает доступные исходные языки для перевода."""
+        # Создаем улучшенную клавиатуру с языками и эмодзи
+        keyboard = []
+        current_row = []
+        
+        # Словарь для популярных языков и их эмодзи
+        language_emojis = {
+            'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+            'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+            'pt': '🇵🇹'
+        }
+        
+        # Создаем список языков для отображения
+        source_languages = []
+        
+        # Добавляем автоопределение в начало списка
+        keyboard.append([InlineKeyboardButton("🔍 Автоопределение", callback_data="source_lang_auto")])
+        
+        # Получаем языки
+        languages = get_available_languages()
+        
+        for code, name in languages.items():
+            emoji = language_emojis.get(code.lower(), '🌐')
+            source_languages.append((code, name, emoji))
+        
+        # Сортируем языки по имени
+        source_languages.sort(key=lambda x: x[1])
+        
+        # Добавляем языки в клавиатуру
+        for code, name, emoji in source_languages:
+            if len(current_row) == 2:
+                keyboard.append(current_row)
+                current_row = []
+            current_row.append(InlineKeyboardButton(f"{emoji} {name}", callback_data=f"source_lang_{code}"))
+        
+        # Добавляем оставшиеся кнопки
+        if current_row:
+            keyboard.append(current_row)
+        
+        # Добавляем кнопки навигации
+        keyboard.append([
+            InlineKeyboardButton("↩️ Назад", callback_data="back_to_settings"),
+            InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Обрабатываем как callback, так и прямые команды
+        source_language_header = "🔍 *Выберите исходный язык текста:*\n\n" \
+                         "Выберите исходный язык текста для перевода.\n" \
+                         "*Автоопределение* работает для большинства случаев.\n" \
+                         "Выберите конкретный язык для более точного перевода."
+        
+        if hasattr(update, 'callback_query'):
+            update.callback_query.edit_message_text(
+                source_language_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            update.message.reply_text(
+                source_language_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    def show_audio_language_options(update, context):
+        """Показывает доступные языки озвучивания."""
+        # Создаем улучшенную клавиатуру с языками и эмодзи
+        keyboard = []
+        current_row = []
+        
+        # Словарь для популярных языков и их эмодзи
+        language_emojis = {
+            'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+            'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+            'pt': '🇵🇹'
+        }
+        
+        # Создаем список языков для отображения
+        audio_languages = []
+        
+        for code, name in AVAILABLE_AUDIO_LANGUAGES.items():
+            emoji = language_emojis.get(code, '🎧')
+            audio_languages.append((code, name, emoji))
+        
+        # Сортируем языки по имени
+        audio_languages.sort(key=lambda x: x[1])
+        
+        # Добавляем языки в клавиатуру
+        for code, name, emoji in audio_languages:
+            if len(current_row) == 2:
+                keyboard.append(current_row)
+                current_row = []
+            current_row.append(InlineKeyboardButton(f"{emoji} {name}", callback_data=f"audio_lang_{code}"))
+        
+        # Добавляем оставшиеся кнопки
+        if current_row:
+            keyboard.append(current_row)
+        
+        # Добавляем кнопки навигации
+        keyboard.append([
+            InlineKeyboardButton("↩️ Назад", callback_data="back_to_settings"),
+            InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Обрабатываем как callback, так и прямые команды
+        language_header = "🎧 *Выберите язык озвучивания:*\n\n" \
+                        "Язык, на котором будет воспроизводиться аудио\n" \
+                        "Выберите язык из меню ниже 👇"
+        
+        if hasattr(update, 'callback_query'):
+            update.callback_query.edit_message_text(
+                language_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            update.message.reply_text(
+                language_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    def show_speed_options(update, context):
+        """Показывает доступные скорости речи."""
+        keyboard = []
+        row = []
+        
+        # Эмодзи для скорости
+        speed_emojis = {
+            0.5: "🐢", 
+            0.6: "🦥",
+            0.7: "🐌",
+            0.8: "🐕",
+            0.9: "🚶", 
+            1.0: "🏃", 
+            1.1: "🏄",
+            1.25: "🚴", 
+            1.5: "🏎️", 
+            1.75: "✈️",
+            2.0: "🚀"
+        }
+        
+        for speed in SPEED_OPTIONS:
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+            emoji = speed_emojis.get(speed, "🔊")
+            row.append(InlineKeyboardButton(f"{emoji} {speed}x", callback_data=f"speed_{speed}"))
+        
+        # Добавляем оставшиеся кнопки
+        if row:
+            keyboard.append(row)
+        
+        # Добавляем кнопки навигации
+        keyboard.append([
+            InlineKeyboardButton("↩️ Назад", callback_data="back_to_settings"),
+            InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Обрабатываем как callback, так и прямые команды с красивым заголовком
+        speed_header = "🔊 *Выберите скорость воспроизведения речи:*\n\n" \
+                      "🐢 *0.5x* - Крайне медленно\n" \
+                      "🦥 *0.6x* - Очень медленно\n" \
+                      "🐌 *0.7x* - Медленно\n" \
+                      "🐕 *0.8x* - Неторопливо\n" \
+                      "🚶 *0.9x* - Чуть ниже нормы\n" \
+                      "🏃 *1.0x* - Обычная скорость\n" \
+                      "🏄 *1.1x* - Чуть выше нормы\n" \
+                      "🚴 *1.25x* - Быстро\n" \
+                      "🏎️ *1.5x* - Очень быстро\n" \
+                      "✈️ *1.75x* - Сверхбыстро\n" \
+                      "🚀 *2.0x* - Максимальная скорость"
+        
+        if hasattr(update, 'callback_query'):
+            update.callback_query.edit_message_text(
+                speed_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            update.message.reply_text(
+                speed_header,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
+    def handle_button(update, context):
+        """Обрабатывает нажатия кнопок в инлайн-клавиатуре."""
+        query = update.callback_query
+        query.answer()
+        
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        callback_data = query.data
+        
+        # Обработка кнопок копирования текста
+        if callback_data.startswith("copy_text_"):
+            # Извлекаем ID пользователя из callback_data
+            text_user_id = callback_data.split("_")[-1]
+            
+            # Получаем сохраненный текст
+            original_text = context.user_data.get(callback_data)
+            
+            if original_text:
+                # Отправляем текст в виде обычного сообщения для удобного копирования
+                query.message.reply_text(
+                    original_text,
+                    parse_mode=None  # Без форматирования для идеального копирования
+                )
+                query.answer("Текст готов для копирования!")
+            else:
+                query.answer("Ошибка: текст не найден")
+        
+        # Обработка кнопок копирования перевода
+        elif callback_data.startswith("copy_tr_"):
+            # Извлекаем ID пользователя из callback_data
+            tr_user_id = callback_data.split("_")[-1]
+            
+            # Получаем сохраненный перевод
+            translated_text = context.user_data.get(callback_data)
+            
+            if translated_text:
+                # Отправляем текст в виде обычного сообщения для удобного копирования
+                query.message.reply_text(
+                    translated_text,
+                    parse_mode=None  # Без форматирования для идеального копирования
+                )
+                query.answer("Перевод готов для копирования!")
+            else:
+                query.answer("Ошибка: перевод не найден")
+        
+        elif callback_data == "show_source_languages":
+            show_source_language_options(update, context)
+            
+        elif callback_data == "show_languages":
+            show_language_options(update, context)
+        
+        elif callback_data == "show_speeds":
+            show_speed_options(update, context)
+        
+        elif callback_data == "show_features":
+            # Показываем основные возможности бота
+            features_text = (
+                f"🌟 *Основные возможности {APP_NAME}*\n\n"
+                f"📷 *Обработка изображений:*\n"
+                f"• Автоматическое распознавание текста с фотографий\n"
+                f"• Поддержка разных языков на изображениях\n"
+                f"• Обработка изображений с различным качеством\n\n"
+                f"🌐 *Перевод:*\n"
+                f"• Перевод на более чем 100 языков мира\n"
+                f"• Сохранение исходного форматирования текста\n"
+                f"• Поддержка эмодзи и специальных символов\n\n"
+                f"🔊 *Аудио:*\n"
+                f"• Преобразование текста в речь\n"
+                f"• Выбор языка озвучивания отдельно от языка перевода\n"
+                f"• Регулировка скорости воспроизведения (от 0.5x до 2.0x)\n\n"
+                f"⚙️ *Настройки:*\n"
+                f"• Персональные настройки для каждого пользователя\n"
+                f"• Сохранение предпочтений между сессиями\n"
+                f"• Интуитивно понятный интерфейс с кнопками"
+            )
+            
+            # Кнопка для возврата в главное меню
+            keyboard = [[InlineKeyboardButton("↩️ Назад в главное меню", callback_data="back_to_main")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            query.edit_message_text(
+                features_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        
+        elif callback_data == "show_help":
+            # Показываем справку по боту
+            help_text = (
+                f"❓ *Справка по {APP_NAME}*\n\n"
+                f"📋 *Команды:*\n"
+                f"• /start - Начало работы с ботом\n"
+                f"• /help - Показать справку\n"
+                f"• /settings - Настройки бота\n"
+                f"• /source_language - Выбор исходного языка\n"
+                f"• /language - Выбор языка перевода\n"
+                f"• /audio_language - Выбор языка озвучивания\n"
+                f"• /speed - Настройка скорости речи\n\n"
+                f"💡 *Советы:*\n"
+                f"• Делайте четкие фотографии текста\n"
+                f"• Выбирайте язык перевода до отправки сообщения\n"
+                f"• Для длинных текстов используйте более быструю скорость\n"
+                f"• Язык озвучивания может отличаться от языка перевода\n\n"
+                f"🔍 *Решение проблем:*\n"
+                f"• Если текст не распознаётся, сделайте более качественное фото\n"
+                f"• При проблемах с переводом, проверьте настройки языка\n"
+                f"• Для лучшего озвучивания используйте языки с хорошей поддержкой"
+            )
+            
+            # Кнопка для возврата в главное меню
+            keyboard = [[InlineKeyboardButton("↩️ Назад в главное меню", callback_data="back_to_main")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            query.edit_message_text(
+                help_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            
+        elif callback_data == "about_bot":
+            # Показываем информацию о боте
+            about_text = (
+                f"📱 *{APP_NAME} v{APP_VERSION}*\n\n"
+                f"🤖 *Возможности бота:*\n"
+                f"• Извлечение текста из изображений (OCR)\n"
+                f"• Перевод на более чем 100 языков\n"
+                f"• Преобразование текста в речь\n"
+                f"• Настройка скорости воспроизведения\n"
+                f"• Отдельный выбор языка озвучивания\n\n"
+                f"🧩 *Используемые технологии:*\n"
+                f"• Tesseract OCR для распознавания текста\n"
+                f"• Google Translate для перевода\n"
+                f"• gTTS для синтеза речи\n\n"
+                f"📆 Создан: Май 2025\n"
+                f"⚙️ Разработчик: Replit\n"
+                f"📋 Лицензия: MIT"
+            )
+            
+            # Кнопка для возврата в главное меню
+            keyboard = [[InlineKeyboardButton("↩️ Назад в главное меню", callback_data="back_to_main")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            query.edit_message_text(
+                about_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        
+        elif callback_data == "show_audio_languages":
+            # Показываем опции выбора языка озвучивания
+            show_audio_language_options(update, context)
+            
+        elif callback_data == "show_voice_types":
+            # Показываем опции выбора типа голоса
+            show_voice_type_options(update, context)
+            
+        elif callback_data == "back_to_main":
+            # Возврат в главное меню
+            keyboard = [
+                [InlineKeyboardButton("🌟 Возможности бота", callback_data="show_features")],
+                [InlineKeyboardButton("⚙️ Настройки", callback_data="back_to_settings")],
+                [InlineKeyboardButton("🎧 Язык озвучивания", callback_data="show_audio_languages")],
+                [InlineKeyboardButton("🌎 Язык перевода", callback_data="show_languages")],
+                [InlineKeyboardButton("🔊 Скорость речи", callback_data="show_speeds")],
+                [InlineKeyboardButton("🎤 Тип голоса", callback_data="show_voice_types")],
+                [InlineKeyboardButton("ℹ️ О боте", callback_data="about_bot")],
+                [InlineKeyboardButton("❓ Помощь", callback_data="show_help")]
+            ]
+            
+            main_menu_text = (
+                f"🔍 *Главное меню {APP_NAME}*\n\n"
+                f"Выберите нужную опцию из меню:\n\n"
+                f"• Отправьте фото для распознавания текста\n"
+                f"• Отправьте текст для перевода и озвучивания\n"
+                f"• Используйте кнопки для настройки параметров\n\n"
+                f"📋 Версия: {APP_VERSION}"
+            )
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            query.edit_message_text(
+                main_menu_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            
+        elif callback_data == "back_to_settings":
+            # Возврат к настройкам
+            keyboard = [
+                [InlineKeyboardButton("🔍 Изменить исходный язык", callback_data="show_source_languages")],
+                [InlineKeyboardButton("🌎 Изменить язык перевода", callback_data="show_languages")],
+                [InlineKeyboardButton("🎧 Изменить язык озвучивания", callback_data="show_audio_languages")],
+                [InlineKeyboardButton("🎤 Изменить тип голоса", callback_data="show_voice_types")],
+                [InlineKeyboardButton("🔊 Изменить скорость речи", callback_data="show_speeds")],
+                [InlineKeyboardButton("↩️ Назад в главное меню", callback_data="back_to_main")]
+            ]
+            
+            # Получаем эмодзи для языков, скорости и типов голоса
+            language_emojis = {
+                'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+            }
+            speed_emojis = {
+                0.5: "🐢", 0.6: "🦥", 0.7: "🐌", 0.8: "🐕", 0.9: "🚶", 
+                1.0: "🏃", 1.1: "🏄", 1.25: "🚴", 1.5: "🏎️", 1.75: "✈️", 2.0: "🚀"
+            }
+            voice_type_emojis = {
+                "normal": "🔊", "slow": "🐢", "clear": "🔍", "emotional": "😀"
+            }
+            
+            source_language_code = user_prefs[user_id].source_language
+            source_language_emoji = '🔍' if source_language_code == 'auto' else language_emojis.get(source_language_code, '🌐')
+            
+            language_code = user_prefs[user_id].language
+            language_emoji = language_emojis.get(language_code, '🌐')
+            
+            audio_language_code = user_prefs[user_id].audio_language
+            audio_language_emoji = language_emojis.get(audio_language_code, '🎧')
+            
+            speed = user_prefs[user_id].speed
+            speed_emoji = speed_emojis.get(speed, "🔊")
+            
+            # Получаем тип голоса и соответствующую иконку
+            voice_type = user_prefs[user_id].voice_type
+            voice_emoji = voice_type_emojis.get(voice_type, "🎤")
+            
+            current_settings = (
+                f"⚙️ *Настройки {APP_NAME}*\n\n"
+                f"{source_language_emoji} *Исходный язык:* {user_prefs[user_id].source_language_name}\n"
+                f"{language_emoji} *Язык перевода:* {user_prefs[user_id].language_name}\n"
+                f"{audio_language_emoji} *Язык озвучивания:* {user_prefs[user_id].audio_language_name}\n"
+                f"{voice_emoji} *Тип голоса:* {user_prefs[user_id].voice_type_name}\n"
+                f"{speed_emoji} *Скорость речи:* {user_prefs[user_id].speed}x\n\n"
+                f"Выберите опцию для изменения:"
+            )
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            query.edit_message_text(
+                current_settings,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        
+        elif callback_data.startswith("source_lang_"):
+            # Установка исходного языка
+            source_language_code = callback_data[11:]  # Обрезаем 'source_lang_'
+            
+            if source_language_code == "auto":
+                language_name = "Автоопределение"
+            else:
+                languages = get_available_languages()
+                language_name = languages.get(source_language_code)
+                if not language_name:
+                    # Если язык не найден в списке, используем код языка с заглавной буквы
+                    language_name = source_language_code.upper()
+            
+            # Обновляем настройки пользователя
+            user_prefs[user_id].update_source_language(source_language_code)
+            
+            # Эмодзи для языка
+            language_emojis = {
+                'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                'pt': '🇵🇹'
+            }
+            
+            if source_language_code == "auto":
+                lang_emoji = "🔍"
+            else:
+                lang_emoji = language_emojis.get(source_language_code, "🌐")
+            
+            query.edit_message_text(
+                f"✅ *Настройки обновлены*\n\n"
+                f"Исходный язык: {lang_emoji} *{language_name}*\n\n"
+                f"📝 Отправьте мне текст или изображение для обработки.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад к настройкам", callback_data="back_to_settings")]])
+            )
+            
+        elif callback_data.startswith("lang_"):
+            # Установка языка перевода
+            language_code = callback_data[5:]
+            languages = get_available_languages()
+            language_name = languages.get(language_code)
+            if not language_name:
+                # Если язык не найден в списке, используем код языка с заглавной буквы
+                language_name = language_code.upper()
+            
+            user_prefs[user_id].update_language(language_code)
+            
+            # Словарь для популярных языков и их эмодзи
+            language_emojis = {
+                'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+            }
+            
+            flag_emoji = language_emojis.get(language_code, '🌐')
+            
+            query.edit_message_text(
+                f"✅ *Настройки обновлены*\n\n"
+                f"Язык перевода: {flag_emoji} *{language_name}*\n\n"
+                f"📝 Отправьте мне текст или изображение для обработки.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад к настройкам", callback_data="back_to_settings")]])
+            )
+        
+        elif callback_data.startswith("audio_lang_"):
+            # Установка языка озвучивания
+            language_code = callback_data[11:]
+            user_prefs[user_id].update_audio_language(language_code)
+            
+            # Словарь для популярных языков и их эмодзи
+            language_emojis = {
+                'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+            }
+            
+            flag_emoji = language_emojis.get(language_code, '🎧')
+            
+            query.edit_message_text(
+                f"✅ *Настройки обновлены*\n\n"
+                f"Язык озвучивания: {flag_emoji} *{user_prefs[user_id].audio_language_name}*\n\n"
+                f"📝 Отправьте мне текст или изображение для обработки.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад к настройкам", callback_data="back_to_settings")]])
+            )
+        
+        elif callback_data.startswith("speed_"):
+            # Установка скорости
+            speed = float(callback_data[6:])
+            user_prefs[user_id].update_speed(speed)
+            
+            # Эмодзи для скорости
+            speed_emojis = {
+                0.5: "🐢", 
+                0.6: "🦥",
+                0.7: "🐌",
+                0.8: "🐕",
+                0.9: "🚶", 
+                1.0: "🏃", 
+                1.1: "🏄",
+                1.25: "🚴", 
+                1.5: "🏎️", 
+                1.75: "✈️",
+                2.0: "🚀"
+            }
+            
+            speed_emoji = speed_emojis.get(speed, "🔊")
+            
+            query.edit_message_text(
+                f"✅ *Настройки обновлены*\n\n"
+                f"Скорость речи: {speed_emoji} *{speed}x*\n\n"
+                f"📝 Отправьте мне текст или изображение для обработки.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад к настройкам", callback_data="back_to_settings")]])
+            )
+            
+        elif callback_data.startswith("voice_"):
+            # Установка типа голоса
+            voice_type = callback_data[6:]
+            user_prefs[user_id].update_voice_type(voice_type)
+            
+            # Эмодзи для типов голосов
+            voice_type_emojis = {
+                "normal": "🔊",
+                "slow": "🐢",
+                "clear": "🔍",
+                "emotional": "😀"
+            }
+            
+            voice_emoji = voice_type_emojis.get(voice_type, "🎤")
+            
+            query.edit_message_text(
+                f"✅ *Настройки обновлены*\n\n"
+                f"Тип голоса: {voice_emoji} *{user_prefs[user_id].voice_type_name}*\n\n"
+                f"📝 Отправьте мне текст или изображение для обработки.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Назад к настройкам", callback_data="back_to_settings")]])
+            )
+
+    def handle_media_group(update, context):
+        """Обрабатывает группы изображений, сохраняя их для последующей пакетной обработки."""
+        user_id = update.effective_user.id
+        message = update.message
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        # Если изображение является частью группы
+        if message.media_group_id:
+            media_group_id = message.media_group_id
+            
+            # Инициализируем группу, если она еще не существует
+            if media_group_id not in media_groups:
+                media_groups[media_group_id] = {
+                    'user_id': user_id,
+                    'images': [],
+                    'message_id': None
+                }
+                # Сообщение об обработке
+                processing_message = update.message.reply_text(
+                    "🔍 *Получаю группу изображений...*\n\n"
+                    "⏳ Пожалуйста, подождите, пока все изображения будут загружены...",
+                    parse_mode='Markdown'
+                )
+                media_groups[media_group_id]['message_id'] = processing_message.message_id
+
+            # Получаем файл изображения
+            photo = message.photo[-1]  # Берем самую большую версию
+            
+            # Добавляем изображение в группу
+            media_groups[media_group_id]['images'].append(photo)
+            
+            # Планируем обработку группы изображений через 2 секунды после последнего изображения
+            # Это нужно, чтобы дождаться все изображения в группе
+            if 'job' in media_groups[media_group_id]:
+                context.job_queue.scheduler.remove_job(media_groups[media_group_id]['job'].id)
+            
+            # Создаем новую задачу
+            job = context.job_queue.run_once(
+                process_media_group,
+                2,  # Задержка 2 секунды
+                context=(media_group_id, context.bot, update.effective_chat.id)
+            )
+            media_groups[media_group_id]['job'] = job
+            return True
+            
+        return False
+
+    def process_media_group(context):
+        """Обрабатывает сохраненную группу изображений."""
+        job = context.job
+        media_group_id, bot, chat_id = job.context
+        
+        # Проверяем, существует ли группа
+        if media_group_id not in media_groups:
+            return
+        
+        media_group = media_groups[media_group_id]
+        user_id = media_group['user_id']
+        message_id = media_group['message_id']
+        images = media_group['images']
+        
+        # Обновляем сообщение об обработке
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"🔍 *Обработка {len(images)} изображений...*\n\n"
+                 f"🧠 Извлечение текста из всех изображений\n"
+                 f"⏳ Пожалуйста, подождите...",
+            parse_mode='Markdown'
+        )
+        
+        all_texts = []
+        failed_images = 0
+        
+        # Обрабатываем каждое изображение
+        for i, photo in enumerate(images):
+            try:
+                file = bot.get_file(photo.file_id)
+                
+                # Создаем временный файл для загрузки изображения
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                # Загружаем изображение
+                file.download(temp_path)
+                
+                # Извлекаем текст
+                extracted_text = extract_text_from_image(temp_path)
+                
+                # Удаляем временный файл
+                os.unlink(temp_path)
+                
+                if extracted_text:
+                    all_texts.append(f"📄 *Изображение {i+1}:*\n{extracted_text}")
+                else:
+                    failed_images += 1
+                    all_texts.append(f"❌ *Изображение {i+1}:* Текст не распознан")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке изображения {i+1} в группе {media_group_id}: {e}")
+                failed_images += 1
+                all_texts.append(f"❌ *Изображение {i+1}:* Ошибка при обработке")
+        
+        # Объединяем все тексты
+        combined_text = "\n\n".join(all_texts)
+        
+        # Проверяем, есть ли распознанный текст
+        if all(text.startswith("❌") for text in all_texts):
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="❌ *Не удалось извлечь текст ни из одного изображения в группе*\n\n"
+                     "📸 Пожалуйста, убедитесь что изображения четкие и содержат текст.",
+                parse_mode='Markdown'
+            )
+            # Удаляем группу из словаря
+            del media_groups[media_group_id]
+            return
+        
+        # Переводим весь текст
+        language = user_prefs[user_id].language
+        source_language = user_prefs[user_id].source_language
+        
+        # Обновляем сообщение - перевод
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"🔍 *Обработка {len(images)} изображений...*\n\n"
+                 f"✓ Текст извлечен из {len(images) - failed_images} изображений\n"
+                 f"🌐 Выполняется перевод...",
+            parse_mode='Markdown'
+        )
+        
+        # Словарь для популярных языков и их эмодзи
+        language_emojis = {
+            'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+            'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+            'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+        }
+        
+        # Переводим весь текст, если нужно
+        translated_text = combined_text
+        translation_info = ""
+        
+        # Генерируем уникальный ID для текста
+        text_id = f"media_group_{media_group_id}"
+        
+        # Если исходный язык отличается от целевого, выполняем перевод
+        if language != "auto" and (source_language == "auto" or source_language != language):
+            translated_text = translate_text(combined_text, language, source_language)
+            
+            # Добавляем информацию о переводе
+            source_language_emoji = '🔍' if source_language == 'auto' else language_emojis.get(source_language, '🌐')
+            language_emoji = language_emojis.get(language, '🌐')
+            
+            if translated_text != combined_text:
+                translation_info = (
+                    f"\n\n{source_language_emoji} → {language_emoji} *Текст переведен с "
+                    f"{user_prefs[user_id].source_language_name} на {user_prefs[user_id].language_name}*"
+                )
+                # Сохраняем оригинальный текст для кнопки копирования
+                context.bot_data[f"copy_text_{text_id}"] = combined_text
+                context.bot_data[f"copy_tr_{text_id}"] = translated_text
+            else:
+                translation_info = f"\n\n⚠️ *Перевод не требуется или невозможен*"
+        
+        # Формируем кнопки для копирования и озвучивания
+        keyboard = []
+        
+        # Кнопка для копирования исходного текста
+        if source_language != language and translated_text != combined_text:
+            keyboard.append([
+                InlineKeyboardButton("📋 Копировать оригинал", callback_data=f"copy_text_{text_id}"),
+                InlineKeyboardButton("📋 Копировать перевод", callback_data=f"copy_tr_{text_id}")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton("📋 Копировать текст", callback_data=f"copy_text_{text_id}")])
+        
+        # Кнопка для озвучивания
+        keyboard.append([InlineKeyboardButton("🔊 Озвучить текст", callback_data=f"speak_{text_id}")])
+        
+        # Отправляем финальное сообщение с результатами
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"✅ *Обработано {len(images)} изображений*\n\n{translated_text}{translation_info}",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        # Удаляем группу из словаря
+        del media_groups[media_group_id]
+
+    def handle_image(update, context):
+        """Обрабатывает изображения, отправленные пользователем."""
+        user_id = update.effective_user.id
+        
+        # Если изображение является частью группы, обрабатываем его с помощью handle_media_group
+        if update.message.media_group_id:
+            handled = handle_media_group(update, context)
+            if handled:
+                return
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        # Сообщение об обработке с анимированным эмодзи
+        processing_message = update.message.reply_text("🔍 *Обработка вашего изображения...*\n\n" \
+                                                      "🧠 Извлечение текста\n" \
+                                                      "⏳ Пожалуйста, подождите...",
+                                                      parse_mode='Markdown')
+        
+        try:
+            # Получаем файл изображения
+            photo = update.message.photo[-1]  # Берем самую большую версию
+            file = context.bot.get_file(photo.file_id)
+            
+            # Создаем временный файл для загрузки изображения
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # Загружаем изображение
+            file.download(temp_path)
+            
+            # Извлекаем текст
+            extracted_text = extract_text_from_image(temp_path)
+            
+            # Удаляем временный файл
+            os.unlink(temp_path)
+            
+            if not extracted_text:
+                processing_message.edit_text("❌ Извините, не удалось извлечь текст из этого изображения. Пожалуйста, попробуйте с более четким изображением.")
+                return
+            
+            # Язык перевода
+            language = user_prefs[user_id].language
+            
+            # Отправляем извлеченный текст с красивым форматированием и кнопкой для копирования
+            # Создаем копируемую версию текста (без маркдауна для идеального копирования)
+            copy_keyboard = [
+                [InlineKeyboardButton("📋 Скопировать текст", callback_data=f"copy_text_{user_id}")]
+            ]
+            
+            # Сохраняем текст в словаре для последующего копирования
+            if not hasattr(context, 'user_data'):
+                context.user_data = {}
+            context.user_data[f"copy_text_{user_id}"] = extracted_text
+            
+            processing_message.edit_text(
+                f"✅ *Текст успешно извлечен!*\n\n"
+                f"📄 *Распознанный текст:*\n"
+                f"```\n{extracted_text}\n```\n\n"
+                f"🔍 *Перевожу и генерирую аудио...*",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(copy_keyboard)
+            )
+            
+            # Переводим текст
+            source_language = user_prefs[user_id].source_language
+            translated_text = translate_text(extracted_text, language, source_language)
+            
+            # Отправляем перевод с красивым форматированием, если он отличается от оригинала
+            if translated_text != extracted_text:
+                # Словарь для популярных языков и их эмодзи
+                language_emojis = {
+                    'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                    'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                    'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+                }
+                
+                flag_emoji = language_emojis.get(language, '🌐')
+                
+                # Создаем кнопку копирования для перевода
+                copy_tr_keyboard = [
+                    [InlineKeyboardButton("📋 Скопировать перевод", callback_data=f"copy_tr_{user_id}")]
+                ]
+                
+                # Сохраняем перевод для копирования
+                context.user_data[f"copy_tr_{user_id}"] = translated_text
+                
+                # Получаем эмодзи для исходного языка
+                source_language_code = user_prefs[user_id].source_language
+                source_language_emoji = '🔍' if source_language_code == 'auto' else language_emojis.get(source_language_code, '🌐')
+                
+                update.message.reply_text(
+                    f"🌐 *Перевод выполнен!*\n\n"
+                    f"{source_language_emoji} *Исходный язык: {user_prefs[user_id].source_language_name}*\n"
+                    f"{flag_emoji} *Язык перевода: {user_prefs[user_id].language_name}*\n"
+                    f"```\n{translated_text}\n```",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(copy_tr_keyboard)
+                )
+            
+            # Генерируем аудио с информацией о процессе
+            speed = user_prefs[user_id].speed
+            audio_language = user_prefs[user_id].audio_language
+            
+            # Эмодзи для скорости
+            speed_emojis = {
+                0.5: "🐢", 0.6: "🦥", 0.7: "🐌", 0.8: "🐕", 0.9: "🚶", 
+                1.0: "🏃", 1.1: "🏄", 1.25: "🚴", 1.5: "🏎️", 1.75: "✈️", 2.0: "🚀"
+            }
+            speed_emoji = speed_emojis.get(speed, "🔊")
+            
+            # Эмодзи для языка озвучивания
+            language_emojis = {
+                'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+            }
+            audio_language_emoji = language_emojis.get(audio_language, '🎧')
+            
+            # Эмодзи для типа голоса
+            voice_type = user_prefs[user_id].voice_type
+            voice_type_emojis = {
+                "normal": "🔊",
+                "slow": "🐢",
+                "clear": "🔍",
+                "emotional": "😀"
+            }
+            voice_emoji = voice_type_emojis.get(voice_type, "🎤")
+            
+            audio_msg = update.message.reply_text(
+                f"🎵 *Генерация аудиофайла*\n\n"
+                f"{speed_emoji} Скорость: *{speed}x*\n"
+                f"{audio_language_emoji} Язык озвучивания: *{user_prefs[user_id].audio_language_name}*\n"
+                f"{voice_emoji} Тип голоса: *{user_prefs[user_id].voice_type_name}*\n\n"
+                f"⏳ Пожалуйста, подождите...",
+                parse_mode='Markdown'
+            )
+            
+            # Используем язык озвучивания вместо языка перевода
+            voice_type = user_prefs[user_id].voice_type
+            audio_path = text_to_speech(translated_text, audio_language, voice_type)
+            adjusted_audio_path = adjust_audio_speed(audio_path, speed)
+            
+            # Отправляем аудио с информативной подписью
+            with open(adjusted_audio_path, 'rb') as audio:
+                # Создаем подпись к аудио
+                audio_caption = (
+                    f"🎧 *Аудио готово!*\n"
+                    f"{speed_emoji} Скорость: *{speed}x*\n"
+                    f"{audio_language_emoji} Язык озвучивания: *{user_prefs[user_id].audio_language_name}*"
+                )
+                
+                # Отправляем аудио и удаляем сообщение о генерации
+                update.message.reply_voice(audio, caption=audio_caption, parse_mode='Markdown')
+                audio_msg.delete()
+            
+            # Удаляем временные файлы
+            os.unlink(audio_path)
+            os.unlink(adjusted_audio_path)
+        
+        except Exception as e:
+            logger.error(f"Ошибка при обработке изображения: {e}")
+            processing_message.edit_text(
+                f"❌ *Произошла ошибка!*\n\n"
+                f"🔄 Не удалось обработать изображение.\n\n"
+                f"📋 Детали ошибки: ```{str(e)}```\n\n"
+                f"💡 Попробуйте другое изображение с более четким текстом.",
+                parse_mode='Markdown'
+            )
+
+    def handle_voice(update, context):
+        """Обрабатывает голосовые сообщения."""
+        user_id = update.effective_user.id
+        user_name = update.effective_user.first_name
+        chat_id = update.effective_chat.id
+        message_id = update.message.message_id
+        voice = update.message.voice
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        # Создаем сообщение о начале обработки
+        processing_message = update.message.reply_text(
+            "🎤 Обрабатываю голосовое сообщение...",
+            reply_to_message_id=message_id
+        )
+        
+        try:
+            # Скачиваем голосовое сообщение
+            file = context.bot.get_file(voice.file_id)
+            
+            # Создаем временный файл для сохранения голосового сообщения
+            voice_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ogg')
+            voice_file.close()
+            
+            # Скачиваем файл
+            file.download(voice_file.name)
+            logger.info(f"Скачан голосовой файл: {voice_file.name}")
+            
+            # Импортируем функцию преобразования речи в текст
+            from speech_to_text import speech_to_text
+            
+            # Распознаем речь
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=processing_message.message_id,
+                text="🔍 Распознаю речь..."
+            )
+            
+            transcribed_text = speech_to_text(voice_file.name)
+            
+            # Если текст пустой, сообщаем об ошибке
+            if not transcribed_text:
+                context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=processing_message.message_id,
+                    text="❌ Не удалось распознать речь. Попробуйте еще раз с более четким произношением."
+                )
+                return
+            
+            # Обновляем сообщение с распознанным текстом
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=processing_message.message_id,
+                text=f"🎯 Распознанный текст:\n\n{transcribed_text}"
+            )
+            
+            # Обрабатываем распознанный текст как обычное текстовое сообщение
+            # Получаем настройки пользователя
+            target_language = user_prefs[user_id].language
+            source_language = user_prefs[user_id].source_language
+            audio_language = user_prefs[user_id].audio_language
+            voice_type = user_prefs[user_id].voice_type
+            speed = user_prefs[user_id].speed
+            
+            # Переводим текст если нужно
+            if source_language != target_language:
+                translated_text = translate_text(transcribed_text, target_language, source_language)
+                
+                # Если перевод успешный, отправляем его
+                if translated_text and translated_text != transcribed_text:
+                    update.message.reply_text(
+                        f"🌐 Перевод:\n\n{translated_text}",
+                        reply_to_message_id=message_id
+                    )
+                    
+                    # Создаем аудио из переведенного текста
+                    audio_path = text_to_speech(translated_text, audio_language, voice_type)
+                    
+                    # Настраиваем скорость речи
+                    if speed != 1.0:
+                        audio_path = adjust_audio_speed(audio_path, speed)
+                    
+                    # Отправляем аудио
+                    with open(audio_path, 'rb') as audio:
+                        update.message.reply_voice(
+                            audio,
+                            caption=f"🔊 Озвучивание перевода ({user_prefs[user_id].audio_language_name}, {speed}x)",
+                            reply_to_message_id=message_id
+                        )
+                    
+                    # Удаляем временный файл
+                    os.remove(audio_path)
+            
+            # Предлагаем озвучить исходный текст, если не было перевода
+            else:
+                # Создаем аудио из исходного текста с другим голосом
+                audio_path = text_to_speech(transcribed_text, audio_language, voice_type)
+                
+                # Настраиваем скорость речи
+                if speed != 1.0:
+                    audio_path = adjust_audio_speed(audio_path, speed)
+                
+                # Отправляем аудио
+                with open(audio_path, 'rb') as audio:
+                    update.message.reply_voice(
+                        audio,
+                        caption=f"🔊 Озвучивание текста ({user_prefs[user_id].audio_language_name}, {speed}x)",
+                        reply_to_message_id=message_id
+                    )
+                
+                # Удаляем временный файл
+                os.remove(audio_path)
+                
+        except Exception as e:
+            logger.error(f"Ошибка при обработке голосового сообщения: {e}")
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=processing_message.message_id,
+                text=f"❌ Произошла ошибка при обработке голосового сообщения. Попробуйте еще раз."
+            )
+        finally:
+            # Удаляем временный файл голосового сообщения
+            voice_file_path = getattr(voice_file, 'name', None) if 'voice_file' in locals() else None
+            if voice_file_path and os.path.exists(voice_file_path):
+                os.remove(voice_file_path)
+    
+    def handle_text(update, context):
+        """Обрабатывает текстовые сообщения."""
+        user_id = update.effective_user.id
+        
+        # Загружаем настройки пользователя из базы данных
+        if user_id not in user_prefs:
+            user_prefs[user_id] = UserPreferences(user_id)
+            logger.info(f"Загружены настройки пользователя {user_id} из базы данных")
+        
+        # Получаем текст
+        text = update.message.text
+        
+        # Пропускаем команды
+        if text.startswith('/'):
+            return
+        
+        # Сообщение об обработке текста с красивым форматированием
+        processing_message = update.message.reply_text(
+            "🔍 *Обработка вашего текста...*\n\n"
+            "🌐 Перевод текста\n"
+            "🎵 Подготовка к синтезу речи\n"
+            "⏳ Пожалуйста, подождите...",
+            parse_mode='Markdown'
+        )
+        
+        try:
+            # Перевод текста
+            language = user_prefs[user_id].language
+            source_language = user_prefs[user_id].source_language
+            translated_text = translate_text(text, language, source_language)
+            
+            # Отправляем перевод с красивым форматированием
+            
+            # Словарь для популярных языков и их эмодзи
+            language_emojis = {
+                'en': '🇬🇧', 'ru': '🇷🇺', 'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 
+                'it': '🇮🇹', 'zh-CN': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷', 'ar': '🇸🇦',
+                'pt': '🇵🇹', 'tr': '🇹🇷', 'hi': '🇮🇳', 'nl': '🇳🇱', 'pl': '🇵🇱'
+            }
+            
+            flag_emoji = language_emojis.get(language, '🌐')
+            
+            # Получаем эмодзи для исходного языка
+            source_language_code = user_prefs[user_id].source_language
+            source_language_emoji = '🔍' if source_language_code == 'auto' else language_emojis.get(source_language_code, '🌐')
+            
+            if translated_text != text:
+                processing_message.edit_text(
+                    f"🌐 *Перевод выполнен!*\n\n"
+                    f"{source_language_emoji} *Исходный язык: {user_prefs[user_id].source_language_name}*\n"
+                    f"{flag_emoji} *Язык перевода: {user_prefs[user_id].language_name}*\n"
+                    f"```\n{translated_text}\n```\n\n"
+                    f"🎵 *Генерирую аудиоверсию...*",
+                    parse_mode='Markdown'
+                )
+            else:
+                processing_message.edit_text(
+                    f"✅ *Обработка завершена*\n\n"
+                    f"{source_language_emoji} *Исходный язык: {user_prefs[user_id].source_language_name}*\n"
+                    f"{flag_emoji} *Язык текста: {user_prefs[user_id].language_name}*\n"
+                    f"🎵 *Генерирую аудиоверсию...*",
+                    parse_mode='Markdown'
+                )
+            
+            # Генерируем аудио
+            speed = user_prefs[user_id].speed
+            audio_language = user_prefs[user_id].audio_language
+            
+            # Уведомление о генерации аудио
+            # Получаем тип голоса и соответствующую иконку
+            voice_type = user_prefs[user_id].voice_type
+            voice_type_emojis = {
+                "normal": "🔊",
+                "slow": "🐢",
+                "clear": "🔍",
+                "emotional": "😀"
+            }
+            voice_emoji = voice_type_emojis.get(voice_type, "🎤")
+            
+            audio_msg = update.message.reply_text(
+                f"🎵 *Генерация аудиофайла*\n\n"
+                f"⚙️ Скорость: *{speed}x*\n"
+                f"🔊 Язык озвучивания: *{user_prefs[user_id].audio_language_name}*\n"
+                f"{voice_emoji} Тип голоса: *{user_prefs[user_id].voice_type_name}*\n\n"
+                f"⏳ Пожалуйста, подождите...",
+                parse_mode='Markdown'
+            )
+            
+            # Используем язык озвучивания вместо языка перевода
+            voice_type = user_prefs[user_id].voice_type
+            audio_path = text_to_speech(translated_text, audio_language, voice_type)
+            adjusted_audio_path = adjust_audio_speed(audio_path, speed)
+            
+            # Отправляем аудио с информативной подписью
+            
+            # Эмодзи для скорости
+            speed_emojis = {
+                0.5: "🐢", 0.6: "🦥", 0.7: "🐌", 0.8: "🐕", 0.9: "🚶", 
+                1.0: "🏃", 1.1: "🏄", 1.25: "🚴", 1.5: "🏎️", 1.75: "✈️", 2.0: "🚀"
+            }
+            speed_emoji = speed_emojis.get(speed, "🔊")
+            
+            # Получаем эмодзи для языка озвучивания
+            audio_language_emoji = language_emojis.get(audio_language, '🎧')
+            
+            # Получаем эмодзи для типа голоса
+            voice_emoji = voice_type_emojis.get(voice_type, "🎤")
+            
+            with open(adjusted_audio_path, 'rb') as audio:
+                # Создаем подпись к аудио
+                audio_caption = (
+                    f"🎧 *Аудио готово!*\n"
+                    f"{speed_emoji} Скорость: *{speed}x*\n"
+                    f"{audio_language_emoji} Язык озвучивания: *{user_prefs[user_id].audio_language_name}*\n"
+                    f"{voice_emoji} Тип голоса: *{user_prefs[user_id].voice_type_name}*"
+                )
+                
+                # Отправляем аудио и удаляем уведомление о генерации
+                update.message.reply_voice(audio, caption=audio_caption, parse_mode='Markdown')
+                audio_msg.delete()
+            
+            # Удаляем временные файлы
+            os.unlink(audio_path)
+            os.unlink(adjusted_audio_path)
+        
+        except Exception as e:
+            logger.error(f"Ошибка при обработке текста: {e}")
+            processing_message.edit_text(
+                f"❌ *Произошла ошибка!*\n\n"
+                f"🔄 Не удалось обработать текст.\n\n"
+                f"📋 Детали ошибки: ```{str(e)}```\n\n"
+                f"💡 Попробуйте другой текст или обратитесь к администратору.",
+                parse_mode='Markdown'
+            )
+
+    # Создаем и настраиваем бота
+    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not token:
+        print("\033[91mОШИБКА: TELEGRAM_BOT_TOKEN не установлен!\033[0m")
+        return 1
+    updater = Updater(token=token, use_context=True)
+    dispatcher = updater.dispatcher
+    
+    # Добавляем обработчики команд
+    dispatcher.add_handler(CommandHandler("start", start_command))
+    dispatcher.add_handler(CommandHandler("help", help_command))
+    dispatcher.add_handler(CommandHandler("settings", settings_command))
+    dispatcher.add_handler(CommandHandler("language", language_command))
+    dispatcher.add_handler(CommandHandler("audio_language", audio_language_command))
+    dispatcher.add_handler(CommandHandler("voice_type", voice_type_command))
+    dispatcher.add_handler(CommandHandler("source_language", source_language_command))
+    dispatcher.add_handler(CommandHandler("speed", speed_command))
+    
+    # Добавляем обработчик кнопок
+    dispatcher.add_handler(CallbackQueryHandler(handle_button))
+    
+    # Добавляем обработчики сообщений
+    dispatcher.add_handler(MessageHandler(Filters.photo, handle_image))
+    dispatcher.add_handler(MessageHandler(Filters.voice, handle_voice))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+    
+    # Запускаем бота
+    print("\033[92m┌─────────────────────────────────────────┐\033[0m")
+    print(f"\033[92m│   Запуск {APP_NAME} v{APP_VERSION}   │\033[0m")
+    print("\033[92m└─────────────────────────────────────────┘\033[0m")
+    
+    # Запускаем бота в режиме long-polling
+    updater.start_polling()
+    
+    print("\033[92m✓ Бот успешно запущен!\033[0m")
+    print("\033[93m→ Найдите своего бота в Telegram\033[0m")
+    print("\033[93m→ Отправьте команду /start\033[0m")
+    print("\033[94m→ Для остановки бота нажмите Ctrl+C\033[0m")
+    print("\033[95m────────────────────────────────────────────\033[0m")
+    
+    # Ждем завершения, используя встроенный метод idle()
+    updater.idle()
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
